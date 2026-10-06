@@ -6,8 +6,10 @@ const db = require('./database');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '@audio_pdfkitoblari';
-const CHANNEL_LINK = 'https://t.me/audio_pdfkitoblari';
+const REQUIRED_CHANNELS = [
+  { username: '@audio_pdfkitoblari', url: 'https://t.me/audio_pdfkitoblari', name: 'Kitoblar olami (Audio & PDF)' },
+  { username: '@hamyonimai', url: 'https://t.me/hamyonimai', name: 'Hamyonim AI' }
+];
 
 if (!BOT_TOKEN) {
   console.error("Xatolik: BOT_TOKEN topilmadi! .env faylini tekshiring.");
@@ -17,34 +19,54 @@ if (!BOT_TOKEN) {
 const bot = new Bot(BOT_TOKEN);
 
 // Majburiy obuna klaviaturasi
-function getSubKeyboard() {
-  return new InlineKeyboard()
-    .url("📢 Kanalga a'zo bo'lish", CHANNEL_LINK)
-    .row()
-    .text("✅ Obunani tekshirish", "check_sub");
+function getSubKeyboard(unsubscribedChannels) {
+  const keyboard = new InlineKeyboard();
+  const list = unsubscribedChannels && unsubscribedChannels.length > 0 ? unsubscribedChannels : REQUIRED_CHANNELS;
+  list.forEach((ch, idx) => {
+    keyboard.url(`📢 ${idx + 1}-kanalga a'zo bo'lish`, ch.url).row();
+  });
+  keyboard.text("✅ Obunani tekshirish", "check_sub");
+  return keyboard;
+}
+
+// A'zo bo'linmagan kanallarni aniqlash
+async function getUnsubscribedChannels(api, userId) {
+  if (userId === ADMIN_ID) return [];
+  const unsubscribed = [];
+
+  for (const ch of REQUIRED_CHANNELS) {
+    try {
+      const member = await api.getChatMember(ch.username, userId);
+      const isMember = ["creator", "administrator", "member", "restricted"].includes(member.status);
+      if (!isMember) {
+        unsubscribed.push(ch);
+      }
+    } catch (err) {
+      console.error(`Obunani tekshirishda xatolik (${ch.username}):`, err.description || err.message);
+      unsubscribed.push(ch);
+    }
+  }
+
+  return unsubscribed;
 }
 
 // Obunani tekshirish funksiyasi
 async function isUserSubscribed(api, userId) {
-  if (userId === ADMIN_ID) return true;
-  try {
-    const member = await api.getChatMember(REQUIRED_CHANNEL, userId);
-    return ["creator", "administrator", "member", "restricted"].includes(member.status);
-  } catch (err) {
-    console.error("Obunani tekshirishda xatolik:", err.description || err.message);
-    return false;
-  }
+  const unsubscribed = await getUnsubscribedChannels(api, userId);
+  return unsubscribed.length === 0;
 }
 
 // Obuna bo'lish haqida xabar
-async function sendSubPrompt(ctx) {
-  const subText = `⚠️ <b>Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'lishingiz shart:</b>\n\n` +
-    `👉 @audio_pdfkitoblari\n\n` +
-    `Iltimos, kanalga a'zo bo'ling va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
+async function sendSubPrompt(ctx, unsubscribed = REQUIRED_CHANNELS) {
+  let subText = `⚠️ <b>Botdan foydalanish uchun quyidagi homiy kanallarga a'zo bo'lishingiz shart:</b>\n\n`;
+  unsubscribed.forEach((ch, idx) => {
+    subText += `${idx + 1}. 👉 <b>${ch.username}</b>\n`;
+  });
+  subText += `\nIltimos, barcha kanallarga a'zo bo'ling va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
 
   await ctx.reply(subText, {
     parse_mode: "HTML",
-    reply_markup: getSubKeyboard()
+    reply_markup: getSubKeyboard(unsubscribed)
   });
 }
 
@@ -76,15 +98,15 @@ bot.use(async (ctx, next) => {
   }
 
   // Obuna holatini tekshirish
-  const isSub = await isUserSubscribed(ctx.api, userId);
-  if (!isSub) {
+  const unsubscribed = await getUnsubscribedChannels(ctx.api, userId);
+  if (unsubscribed.length > 0) {
     if (ctx.callbackQuery) {
       await ctx.answerCallbackQuery({
-        text: "❌ Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'ling: @audio_pdfkitoblari",
+        text: "❌ Botdan foydalanish uchun barcha homiy kanallarga a'zo bo'ling!",
         show_alert: true
       });
     } else {
-      await sendSubPrompt(ctx);
+      await sendSubPrompt(ctx, unsubscribed);
     }
     return;
   }
@@ -520,9 +542,9 @@ bot.on("callback_query:data", async (ctx) => {
   // Obunani tekshirish tugmasi
   if (data === "check_sub") {
     const userId = ctx.from.id;
-    const isSub = await isUserSubscribed(ctx.api, userId);
-    if (isSub) {
-      await ctx.answerCallbackQuery({ text: "✅ Rahmat! Obunangiz tasdiqlandi." });
+    const unsubscribed = await getUnsubscribedChannels(ctx.api, userId);
+    if (unsubscribed.length === 0) {
+      await ctx.answerCallbackQuery({ text: "✅ Rahmat! Barcha kanallarga obuna tasdiqlandi." });
       try {
         await ctx.deleteMessage();
       } catch (_) {}
@@ -540,7 +562,7 @@ bot.on("callback_query:data", async (ctx) => {
       });
     } else {
       await ctx.answerCallbackQuery({
-        text: "❌ Siz hali kanalga a'zo bo'lmadingiz! Iltimos, oldin kanalga a'zo bo'ling.",
+        text: `❌ Siz hali barcha kanallarga a'zo bo'lmadingiz! (${unsubscribed.length} ta kanal qoldi)`,
         show_alert: true
       });
     }
