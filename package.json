@@ -11,7 +11,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@grammyjs/runner": "^2.0.3",
     "dotenv": "^18.0.5",
-    "grammy": "^1.46.0"
+    "grammy": "^1.46.0",
+    "pg": "^8.23.1"
   }
 }

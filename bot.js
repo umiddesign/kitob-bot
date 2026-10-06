@@ -1,5 +1,7 @@
 require('dotenv').config();
 const { Bot, InlineKeyboard, Keyboard } = require('grammy');
+const { run, sequentialize } = require('@grammyjs/runner');
+const http = require('node:http');
 const db = require('./database');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -12,7 +14,16 @@ if (!BOT_TOKEN) {
 
 const bot = new Bot(BOT_TOKEN);
 
-// Admin holatlarini saqlash (in-memory state)
+// Bir foydalanuvchining xabarlari ketma-ket, lekin turli foydalanuvchilar parallel ishlashi uchun
+bot.use(
+  sequentialize((ctx) => {
+    const chat = ctx.chat?.id.toString();
+    const user = ctx.from?.id.toString();
+    return [chat, user].filter(Boolean);
+  })
+);
+
+// Admin holatlarini saqlash
 const adminState = new Map();
 
 // Asosiy menyu klaviaturasi
@@ -62,13 +73,21 @@ function getBookInlineKeyboard(book) {
 
 // Kitob matnini chiroyli formatlash
 function formatBookCaption(book) {
-  let text = `📖 <b>${book.title}</b>\n\n`;
-  if (book.author) text += `✍️ <b>Muallif:</b> ${book.author}\n`;
-  text += `🔢 <b>Kitob kodi:</b> <code>${book.code}</code>\n`;
-  if (book.description) text += `\n📝 <b>Tavsif:</b>\n${book.description}\n`;
+  let text = `📖 <b>${escapeHtml(book.title)}</b>\n\n`;
+  if (book.author) text += `✍️ <b>Muallif:</b> ${escapeHtml(book.author)}\n`;
+  text += `🔢 <b>Kitob kodi:</b> <code>${escapeHtml(book.code)}</code>\n`;
+  if (book.description) text += `\n📝 <b>Tavsif:</b>\n${escapeHtml(book.description)}\n`;
   
   text += `\n<i>Yuklab olish uchun quyidagi tugmalardan foydalaning:</i>`;
   return text;
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // Foydalanuvchiga kitobni ko'rsatish
@@ -101,10 +120,10 @@ async function sendBookCard(ctx, book) {
 bot.command("start", async (ctx) => {
   const user = ctx.from;
   if (user) {
-    db.addUser(user.id, user.username, user.first_name);
+    await db.addUser(user.id, user.username, user.first_name);
   }
 
-  const welcomeText = `Assalomu alaykum, <b>${ctx.from?.first_name || 'Foydalanuvchi'}</b>!\n\n` +
+  const welcomeText = `Assalomu alaykum, <b>${escapeHtml(ctx.from?.first_name || 'Foydalanuvchi')}</b>!\n\n` +
     `📚 <b>Kitoblar olamiga xush kelibsiz!</b>\n\n` +
     `Ushbu bot orqali siz o'zingizga kerakli kitoblarning <b>PDF elektron nusxasini</b> hamda <b>Audio formatini</b> bir joydan topishingiz mumkin.\n\n` +
     `🔍 <b>Qanday qidirish mumkin?</b>\n` +
@@ -140,8 +159,8 @@ bot.hears("🔍 Kitob qidirish", async (ctx) => {
 async function showBooksList(ctx, page = 1) {
   const limit = 6;
   const offset = (page - 1) * limit;
-  const totalBooks = db.getTotalBooksCount();
-  const books = db.getAllBooks(limit, offset);
+  const totalBooks = await db.getTotalBooksCount();
+  const books = await db.getAllBooks(limit, offset);
 
   if (totalBooks === 0) {
     await ctx.reply("Hozircha bazada hech qanday kitob mavjud emas.");
@@ -153,8 +172,8 @@ async function showBooksList(ctx, page = 1) {
 
   books.forEach((b, index) => {
     const num = offset + index + 1;
-    text += `${num}. <b>${b.title}</b> (Kod: <code>${b.code}</code>)\n`;
-    if (b.author) text += `   ✍️ ${b.author}\n`;
+    text += `${num}. <b>${escapeHtml(b.title)}</b> (Kod: <code>${escapeHtml(b.code)}</code>)\n`;
+    if (b.author) text += `   ✍️ ${escapeHtml(b.author)}\n`;
     inline.text(`📖 ${b.code} - ${b.title.substring(0, 20)}`, `view:${b.id}`).row();
   });
 
@@ -213,8 +232,8 @@ bot.hears("⚙️ Admin paneli", async (ctx) => {
 // Statistika
 bot.hears("📊 Statistika", async (ctx) => {
   if (ctx.from?.id !== ADMIN_ID) return;
-  const userCount = db.getUserCount();
-  const bookCount = db.getTotalBooksCount();
+  const userCount = await db.getUserCount();
+  const bookCount = await db.getTotalBooksCount();
 
   const statText = `📊 <b>Bot statistikasi:</b>\n\n` +
     `👥 Jami foydalanuvchilar: <b>${userCount} ta</b>\n` +
@@ -270,7 +289,8 @@ bot.on("message", async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  db.addUser(userId, ctx.from.username, ctx.from.first_name);
+  // Foydalanuvchini bazaga qo'shish
+  await db.addUser(userId, ctx.from.username, ctx.from.first_name);
 
   // Admin bosqichlarini tekshirish
   if (userId === ADMIN_ID && adminState.has(userId)) {
@@ -281,15 +301,15 @@ bot.on("message", async (ctx) => {
     // 1. O'chirish
     if (state.step === "DELETE_CODE") {
       if (!text) return ctx.reply("Iltimos, kitob kodini matn ko'rinishida yuboring.");
-      const success = db.deleteBookByCode(text);
+      const success = await db.deleteBookByCode(text);
       adminState.delete(userId);
       if (success) {
-        await ctx.reply(`✅ <code>${text}</code> kodli kitob muvaffaqiyatli o'chirildi!`, {
+        await ctx.reply(`✅ <code>${escapeHtml(text)}</code> kodli kitob muvaffaqiyatli o'chirildi!`, {
           parse_mode: "HTML",
           reply_markup: getAdminKeyboard()
         });
       } else {
-        await ctx.reply(`❌ <code>${text}</code> kodli kitob topilmadi.`, {
+        await ctx.reply(`❌ <code>${escapeHtml(text)}</code> kodli kitob topilmadi.`, {
           parse_mode: "HTML",
           reply_markup: getAdminKeyboard()
         });
@@ -300,7 +320,7 @@ bot.on("message", async (ctx) => {
     // 2. Xabar tarqatish (Broadcast)
     if (state.step === "BROADCAST") {
       adminState.delete(userId);
-      const userIds = db.getAllUserIds();
+      const userIds = await db.getAllUserIds();
       await ctx.reply(`🚀 Xabar ${userIds.length} ta foydalanuvchiga yuborilmoqda...`);
 
       let sentCount = 0;
@@ -310,6 +330,8 @@ bot.on("message", async (ctx) => {
         try {
           await ctx.copyMessage(id);
           sentCount++;
+          // Telegram rate limitini buzmaslik uchun kichik kechikish
+          await new Promise(r => setTimeout(r, 40));
         } catch (_) {
           blockedCount++;
         }
@@ -328,8 +350,9 @@ bot.on("message", async (ctx) => {
     // Qadam 1: Kod
     if (state.step === "ADD_CODE") {
       if (!text) return ctx.reply("Iltimos, kodni yozib yuboring:");
-      if (db.bookCodeExists(text)) {
-        return ctx.reply(`❌ Bu kod (<code>${text}</code>) band! Boshqa kod kiriting:`, { parse_mode: "HTML" });
+      const exists = await db.bookCodeExists(text);
+      if (exists) {
+        return ctx.reply(`❌ Bu kod (<code>${escapeHtml(text)}</code>) band! Boshqa kod kiriting:`, { parse_mode: "HTML" });
       }
       state.data.code = text;
       state.step = "ADD_TITLE";
@@ -417,7 +440,7 @@ bot.on("message", async (ctx) => {
       }
 
       // Bazaga saqlash
-      db.addBook({
+      await db.addBook({
         code: state.data.code,
         title: state.data.title,
         author: state.data.author,
@@ -427,7 +450,7 @@ bot.on("message", async (ctx) => {
         audio_file_id: state.data.audio_file_id
       });
 
-      const savedBook = db.getBookByCode(state.data.code);
+      const savedBook = await db.getBookByCode(state.data.code);
       adminState.delete(userId);
 
       await ctx.reply("🎉 <b>Kitob muvaffaqiyatli saqlandi!</b>\nQuyida qanday ko'rinishda chiqishi keltirilgan:", {
@@ -447,26 +470,26 @@ bot.on("message", async (ctx) => {
   if (!query) return;
 
   // 1. Aniq kod bo'yicha qidiruv
-  const bookByCode = db.getBookByCode(query);
+  const bookByCode = await db.getBookByCode(query);
   if (bookByCode) {
     await sendBookCard(ctx, bookByCode);
     return;
   }
 
   // 2. Nom yoki muallif bo'yicha qidiruv
-  const foundBooks = db.searchBooks(query);
+  const foundBooks = await db.searchBooks(query);
   if (foundBooks.length === 1) {
     await sendBookCard(ctx, foundBooks[0]);
     return;
   }
 
   if (foundBooks.length > 1) {
-    let text = `🔍 <b>"${query}"</b> bo'yicha ${foundBooks.length} ta kitob topildi:\n\n`;
+    let text = `🔍 <b>"${escapeHtml(query)}"</b> bo'yicha ${foundBooks.length} ta kitob topildi:\n\n`;
     const inline = new InlineKeyboard();
 
     foundBooks.forEach((b) => {
-      text += `• <b>${b.title}</b> (Kod: <code>${b.code}</code>)\n`;
-      if (b.author) text += `  ✍️ ${b.author}\n`;
+      text += `• <b>${escapeHtml(b.title)}</b> (Kod: <code>${escapeHtml(b.code)}</code>)\n`;
+      if (b.author) text += `  ✍️ ${escapeHtml(b.author)}\n`;
       inline.text(`📖 ${b.code} - ${b.title.substring(0, 20)}`, `view:${b.id}`).row();
     });
 
@@ -479,7 +502,7 @@ bot.on("message", async (ctx) => {
 
   // Topilmadi
   await ctx.reply(
-    `❌ Kechirasiz, <b>"${query}"</b> bo'yicha hech qanday kitob topilmadi.\n\n` +
+    `❌ Kechirasiz, <b>"${escapeHtml(query)}"</b> bo'yicha hech qanday kitob topilmadi.\n\n` +
     `💡 <i>Maslahat: Kitob kodi yoki nomini to'g'ri yozganingizni tekshiring yoki <b>"📚 Barcha kitoblar"</b> bo'limidan qidiring.</i>`,
     { parse_mode: "HTML" }
   );
@@ -506,7 +529,7 @@ bot.on("callback_query:data", async (ctx) => {
   // Kitob kartasini ochish
   if (data.startsWith("view:")) {
     const bookId = Number(data.split(":")[1]);
-    const book = db.getBookById(bookId);
+    const book = await db.getBookById(bookId);
     await ctx.answerCallbackQuery();
     if (book) {
       await sendBookCard(ctx, book);
@@ -519,14 +542,14 @@ bot.on("callback_query:data", async (ctx) => {
   // PDF yuklab olish
   if (data.startsWith("pdf:")) {
     const bookId = Number(data.split(":")[1]);
-    const book = db.getBookById(bookId);
+    const book = await db.getBookById(bookId);
     if (!book || !book.pdf_file_id) {
       await ctx.answerCallbackQuery({ text: "PDF fayli mavjud emas!", show_alert: true });
       return;
     }
     await ctx.answerCallbackQuery({ text: "PDF yuklanmoqda..." });
     await ctx.replyWithDocument(book.pdf_file_id, {
-      caption: `📄 <b>${book.title}</b> (PDF nusxa)`,
+      caption: `📄 <b>${escapeHtml(book.title)}</b> (PDF nusxa)`,
       parse_mode: "HTML"
     });
     return;
@@ -535,14 +558,14 @@ bot.on("callback_query:data", async (ctx) => {
   // Audio tinglash
   if (data.startsWith("audio:")) {
     const bookId = Number(data.split(":")[1]);
-    const book = db.getBookById(bookId);
+    const book = await db.getBookById(bookId);
     if (!book || !book.audio_file_id) {
       await ctx.answerCallbackQuery({ text: "Audio fayli mavjud emas!", show_alert: true });
       return;
     }
     await ctx.answerCallbackQuery({ text: "Audio yuklanmoqda..." });
     await ctx.replyWithAudio(book.audio_file_id, {
-      caption: `🎧 <b>${book.title}</b> (Audio kitob)`,
+      caption: `🎧 <b>${escapeHtml(book.title)}</b> (Audio kitob)`,
       parse_mode: "HTML"
     });
     return;
@@ -551,7 +574,7 @@ bot.on("callback_query:data", async (ctx) => {
   // Ikkalasini ham olish
   if (data.startsWith("both:")) {
     const bookId = Number(data.split(":")[1]);
-    const book = db.getBookById(bookId);
+    const book = await db.getBookById(bookId);
     if (!book) {
       await ctx.answerCallbackQuery({ text: "Kitob topilmadi!", show_alert: true });
       return;
@@ -560,14 +583,14 @@ bot.on("callback_query:data", async (ctx) => {
 
     if (book.pdf_file_id) {
       await ctx.replyWithDocument(book.pdf_file_id, {
-        caption: `📄 <b>${book.title}</b> (PDF nusxa)`,
+        caption: `📄 <b>${escapeHtml(book.title)}</b> (PDF nusxa)`,
         parse_mode: "HTML"
       });
     }
 
     if (book.audio_file_id) {
       await ctx.replyWithAudio(book.audio_file_id, {
-        caption: `🎧 <b>${book.title}</b> (Audio kitob)`,
+        caption: `🎧 <b>${escapeHtml(book.title)}</b> (Audio kitob)`,
         parse_mode: "HTML"
       });
     }
@@ -577,26 +600,45 @@ bot.on("callback_query:data", async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// Xatoliklarni ushlash
+// Xatoliklarni ushlash va botni to'xtamasligini ta'minlash (Auto-recovery)
 bot.catch((err) => {
-  console.error("Botda xatolik yuz berdi:", err);
+  const ctx = err.ctx;
+  console.error(`Xatolik yuz berdi (${ctx?.update?.update_id}):`, err.error);
 });
 
-// Render / Railway uchun yengil HTTP Health-Check serveri
-const http = require('node:http');
+// Render / Railway uchun HTTP Health-Check serveri
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Bot muvaffaqiyatli ishlamoqda!');
+  res.end('Bot ajoyib tarzda 24/7 ishlamoqda!');
 }).listen(PORT, () => {
   console.log(`🌐 Health-check serveri ${PORT}-portda ishlamoqda`);
 });
 
-// Botni ishga tushirish
-console.log("Bot ishga tushirilmoqda...");
-bot.start({
-  onStart: (botInfo) => {
-    console.log(`✅ Bot muvaffaqiyatli ishga tushdi: @${botInfo.username}`);
-  }
-});
+// Asosiy ishga tushirish funksiyasi
+async function startApp() {
+  try {
+    await db.initDB();
+    console.log("🚀 Ma'lumotlar bazasi tayyor.");
 
+    // Runner bilan parallel ko'p oqimli ishga tushirish
+    const runner = run(bot, {
+      runner: {
+        fetch: {
+          allowed_updates: ["message", "callback_query"],
+        },
+      },
+    });
+
+    console.log("⚡ Bot parallel High-Load rejimida ishga tushirildi!");
+
+    // Graceful shutdown
+    const stopRunner = () => runner.isRunning() && runner.stop();
+    process.once("SIGINT", stopRunner);
+    process.once("SIGTERM", stopRunner);
+  } catch (err) {
+    console.error("Ishga tushirishda xatolik:", err);
+  }
+}
+
+startApp();
