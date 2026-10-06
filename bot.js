@@ -29,11 +29,10 @@ const adminState = new Map();
 // Asosiy menyu klaviaturasi
 function getMainKeyboard(userId) {
   const keyboard = new Keyboard()
-    .text("🔍 Kitob qidirish").text("📚 Barcha kitoblar").row()
-    .text("ℹ️ Yordam");
+    .text("🔍 Kitob kodi orqali qidirish").text("ℹ️ Yordam");
   
   if (userId === ADMIN_ID) {
-    keyboard.text("⚙️ Admin paneli");
+    keyboard.row().text("⚙️ Admin paneli");
   }
   return keyboard.resized();
 }
@@ -125,11 +124,10 @@ bot.command("start", async (ctx) => {
 
   const welcomeText = `Assalomu alaykum, <b>${escapeHtml(ctx.from?.first_name || 'Foydalanuvchi')}</b>!\n\n` +
     `📚 <b>Kitoblar olamiga xush kelibsiz!</b>\n\n` +
-    `Ushbu bot orqali siz o'zingizga kerakli kitoblarning <b>PDF elektron nusxasini</b> hamda <b>Audio formatini</b> bir joydan topishingiz mumkin.\n\n` +
-    `🔍 <b>Qanday qidirish mumkin?</b>\n` +
-    `• Shunchaki kitob <b>kodini</b> yuboring (masalan: <code>101</code>)\n` +
-    `• Yoki kitob <b>nomini/muallifini</b> yozib yuboring.\n\n` +
-    `Quyidagi menyudan kerakli bo'limni tanlang:`;
+    `Ushbu bot orqali siz kerakli kitoblarning <b>PDF elektron nusxasini</b> hamda <b>Audio formatini</b> bir joydan olishingiz mumkin.\n\n` +
+    `🔢 <b>Kitobni olish uchun:</b>\n` +
+    `Shunchaki kitobning <b>kodini</b> yuboring (masalan: <code>101</code>).\n\n` +
+    `Kerakli bo'limni tanlang:`;
 
   await ctx.reply(welcomeText, {
     parse_mode: "HTML",
@@ -140,72 +138,22 @@ bot.command("start", async (ctx) => {
 // Yordam
 bot.hears("ℹ️ Yordam", async (ctx) => {
   const helpText = `ℹ️ <b>Botdan foydalanish bo'yicha qo'llanma:</b>\n\n` +
-    `1. <b>Kod orqali qidirish:</b> Agar kitob kodini bilsangiz, to'g'ridan-to'g'ri raqamni yuboring (masalan: <code>101</code>).\n` +
-    `2. <b>Nomi orqali qidirish:</b> Kitob yoki muallif nomini kiriting (masalan: <i>O'tkan kunlar</i> yoki <i>Qodiriy</i>).\n` +
-    `3. <b>Fayllarni yuklash:</b> Kitob topilgach, uning ostidagi <b>PDF</b> yoki <b>Audio</b> tugmasini bosib, faylni darhol qabul qiling.\n\n` +
-    `Savol va takliflar bo'lsa adminga murojaat qilishingiz mumkin.`;
+    `1. Kitobning maxsus <b>kodini</b> yozib yuboring (masalan: <code>101</code>).\n` +
+    `2. Bot sizga kitob ma'lumotlarini taqdim etadi.\n` +
+    `3. Kerakli formatni tanlang:\n` +
+    `   • 📄 <b>PDF yuklab olish</b>\n` +
+    `   • 🎧 <b>Audio tinglash</b>\n` +
+    `   • 📦 <b>Ikkalasini ham olish</b>\n\n` +
+    `<i>Eslatma: Qidiruv faqat kitob kodi orqali ishlaydi.</i>`;
 
   await ctx.reply(helpText, { parse_mode: "HTML" });
 });
 
 // Qidirish tugmasi
-bot.hears("🔍 Kitob qidirish", async (ctx) => {
-  await ctx.reply("🔍 Kitob kodini yoki nomini yuboring:\n<i>(Masalan: <code>101</code> yoki <code>Sariq devni minib</code>)</i>", {
+bot.hears(["🔍 Kitob kodi orqali qidirish", "🔍 Kitob qidirish"], async (ctx) => {
+  await ctx.reply("🔢 Kitob <b>kodini</b> yuboring:\n<i>(Masalan: <code>101</code>)</i>", {
     parse_mode: "HTML"
   });
-});
-
-// Barcha kitoblar ro'yxati
-async function showBooksList(ctx, page = 1) {
-  const limit = 6;
-  const offset = (page - 1) * limit;
-  const totalBooks = await db.getTotalBooksCount();
-  const books = await db.getAllBooks(limit, offset);
-
-  if (totalBooks === 0) {
-    await ctx.reply("Hozircha bazada hech qanday kitob mavjud emas.");
-    return;
-  }
-
-  let text = `📚 <b>Kitoblar ro'yxati</b> (Jami: ${totalBooks} ta):\n\n`;
-  const inline = new InlineKeyboard();
-
-  books.forEach((b, index) => {
-    const num = offset + index + 1;
-    text += `${num}. <b>${escapeHtml(b.title)}</b> (Kod: <code>${escapeHtml(b.code)}</code>)\n`;
-    if (b.author) text += `   ✍️ ${escapeHtml(b.author)}\n`;
-    inline.text(`📖 ${b.code} - ${b.title.substring(0, 20)}`, `view:${b.id}`).row();
-  });
-
-  const totalPages = Math.ceil(totalBooks / limit);
-  const navButtons = [];
-  if (page > 1) {
-    navButtons.push(InlineKeyboard.text("⬅️ Oldingi", `page:${page - 1}`));
-  }
-  navButtons.push(InlineKeyboard.text(`📄 ${page}/${totalPages}`, `noop`));
-  if (page < totalPages) {
-    navButtons.push(InlineKeyboard.text("Keyingi ➡️", `page:${page + 1}`));
-  }
-
-  inline.row(...navButtons);
-
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, {
-        parse_mode: "HTML",
-        reply_markup: inline
-      });
-    } catch (_) {}
-  } else {
-    await ctx.reply(text, {
-      parse_mode: "HTML",
-      reply_markup: inline
-    });
-  }
-}
-
-bot.hears("📚 Barcha kitoblar", async (ctx) => {
-  await showBooksList(ctx, 1);
 });
 
 // Bosh menyuga qaytish
@@ -465,45 +413,20 @@ bot.on("message", async (ctx) => {
     }
   }
 
-  // Oddiy matn yuborilganda — Qidiruv
-  const query = ctx.message.text?.trim();
-  if (!query) return;
+  // Foydalanuvchi matn yuborganda — FAQAT KOD bo'yicha qidiruv
+  const code = ctx.message.text?.trim();
+  if (!code) return;
 
-  // 1. Aniq kod bo'yicha qidiruv
-  const bookByCode = await db.getBookByCode(query);
+  const bookByCode = await db.getBookByCode(code);
   if (bookByCode) {
     await sendBookCard(ctx, bookByCode);
     return;
   }
 
-  // 2. Nom yoki muallif bo'yicha qidiruv
-  const foundBooks = await db.searchBooks(query);
-  if (foundBooks.length === 1) {
-    await sendBookCard(ctx, foundBooks[0]);
-    return;
-  }
-
-  if (foundBooks.length > 1) {
-    let text = `🔍 <b>"${escapeHtml(query)}"</b> bo'yicha ${foundBooks.length} ta kitob topildi:\n\n`;
-    const inline = new InlineKeyboard();
-
-    foundBooks.forEach((b) => {
-      text += `• <b>${escapeHtml(b.title)}</b> (Kod: <code>${escapeHtml(b.code)}</code>)\n`;
-      if (b.author) text += `  ✍️ ${escapeHtml(b.author)}\n`;
-      inline.text(`📖 ${b.code} - ${b.title.substring(0, 20)}`, `view:${b.id}`).row();
-    });
-
-    await ctx.reply(text, {
-      parse_mode: "HTML",
-      reply_markup: inline
-    });
-    return;
-  }
-
-  // Topilmadi
+  // Topilmaganda:
   await ctx.reply(
-    `❌ Kechirasiz, <b>"${escapeHtml(query)}"</b> bo'yicha hech qanday kitob topilmadi.\n\n` +
-    `💡 <i>Maslahat: Kitob kodi yoki nomini to'g'ri yozganingizni tekshiring yoki <b>"📚 Barcha kitoblar"</b> bo'limidan qidiring.</i>`,
+    `❌ Kechirasiz, <code>${escapeHtml(code)}</code> kodli kitob topilmadi.\n\n` +
+    `💡 <i>Iltimos, kitob kodini to'g'ri kiritganingizga ishonch hosil qiling (Masalan: <code>101</code>).</i>`,
     { parse_mode: "HTML" }
   );
 });
@@ -515,27 +438,6 @@ bot.on("callback_query:data", async (ctx) => {
 
   if (data === "noop") {
     await ctx.answerCallbackQuery();
-    return;
-  }
-
-  // Sahifalash (Pagination)
-  if (data.startsWith("page:")) {
-    const page = Number(data.split(":")[1]);
-    await ctx.answerCallbackQuery();
-    await showBooksList(ctx, page);
-    return;
-  }
-
-  // Kitob kartasini ochish
-  if (data.startsWith("view:")) {
-    const bookId = Number(data.split(":")[1]);
-    const book = await db.getBookById(bookId);
-    await ctx.answerCallbackQuery();
-    if (book) {
-      await sendBookCard(ctx, book);
-    } else {
-      await ctx.reply("Kechirasiz, bu kitob bazadan topilmadi.");
-    }
     return;
   }
 
