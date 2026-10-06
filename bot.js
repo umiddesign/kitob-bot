@@ -6,6 +6,8 @@ const db = require('./database');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
+const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '@audio_pdfkitoblari';
+const CHANNEL_LINK = 'https://t.me/audio_pdfkitoblari';
 
 if (!BOT_TOKEN) {
   console.error("Xatolik: BOT_TOKEN topilmadi! .env faylini tekshiring.");
@@ -13,6 +15,38 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Bot(BOT_TOKEN);
+
+// Majburiy obuna klaviaturasi
+function getSubKeyboard() {
+  return new InlineKeyboard()
+    .url("📢 Kanalga a'zo bo'lish", CHANNEL_LINK)
+    .row()
+    .text("✅ Obunani tekshirish", "check_sub");
+}
+
+// Obunani tekshirish funksiyasi
+async function isUserSubscribed(api, userId) {
+  if (userId === ADMIN_ID) return true;
+  try {
+    const member = await api.getChatMember(REQUIRED_CHANNEL, userId);
+    return ["creator", "administrator", "member", "restricted"].includes(member.status);
+  } catch (err) {
+    console.error("Obunani tekshirishda xatolik:", err.description || err.message);
+    return false;
+  }
+}
+
+// Obuna bo'lish haqida xabar
+async function sendSubPrompt(ctx) {
+  const subText = `⚠️ <b>Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'lishingiz shart:</b>\n\n` +
+    `👉 @audio_pdfkitoblari\n\n` +
+    `Iltimos, kanalga a'zo bo'ling va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
+
+  await ctx.reply(subText, {
+    parse_mode: "HTML",
+    reply_markup: getSubKeyboard()
+  });
+}
 
 // Bir foydalanuvchining xabarlari ketma-ket, lekin turli foydalanuvchilar parallel ishlashi uchun
 bot.use(
@@ -22,6 +56,41 @@ bot.use(
     return [chat, user].filter(Boolean);
   })
 );
+
+// Majburiy obunani tekshiruvchi global middleware
+bot.use(async (ctx, next) => {
+  const userId = ctx.from?.id;
+  if (!userId) return next();
+
+  // Foydalanuvchini bazaga kiritish
+  await db.addUser(userId, ctx.from.username, ctx.from.first_name);
+
+  // Admin har doim cheklovlarsiz o'tadi
+  if (userId === ADMIN_ID) {
+    return next();
+  }
+
+  // Agar "Obunani tekshirish" tugmasi bosilgan bo'lsa, o'tkazish
+  if (ctx.callbackQuery && ctx.callbackQuery.data === "check_sub") {
+    return next();
+  }
+
+  // Obuna holatini tekshirish
+  const isSub = await isUserSubscribed(ctx.api, userId);
+  if (!isSub) {
+    if (ctx.callbackQuery) {
+      await ctx.answerCallbackQuery({
+        text: "❌ Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'ling: @audio_pdfkitoblari",
+        show_alert: true
+      });
+    } else {
+      await sendSubPrompt(ctx);
+    }
+    return;
+  }
+
+  return next();
+});
 
 // Admin holatlarini saqlash
 const adminState = new Map();
@@ -118,8 +187,15 @@ async function sendBookCard(ctx, book) {
 // /start
 bot.command("start", async (ctx) => {
   const user = ctx.from;
-  if (user) {
-    await db.addUser(user.id, user.username, user.first_name);
+  if (!user) return;
+
+  await db.addUser(user.id, user.username, user.first_name);
+
+  // Majburiy obunani tekshirish
+  const isSub = await isUserSubscribed(ctx.api, user.id);
+  if (!isSub) {
+    await sendSubPrompt(ctx);
+    return;
   }
 
   const welcomeText = `Assalomu alaykum, <b>${escapeHtml(ctx.from?.first_name || 'Foydalanuvchi')}</b>!\n\n` +
@@ -438,6 +514,36 @@ bot.on("callback_query:data", async (ctx) => {
 
   if (data === "noop") {
     await ctx.answerCallbackQuery();
+    return;
+  }
+
+  // Obunani tekshirish tugmasi
+  if (data === "check_sub") {
+    const userId = ctx.from.id;
+    const isSub = await isUserSubscribed(ctx.api, userId);
+    if (isSub) {
+      await ctx.answerCallbackQuery({ text: "✅ Rahmat! Obunangiz tasdiqlandi." });
+      try {
+        await ctx.deleteMessage();
+      } catch (_) {}
+
+      const welcomeText = `Assalomu alaykum, <b>${escapeHtml(ctx.from?.first_name || 'Foydalanuvchi')}</b>!\n\n` +
+        `📚 <b>Kitoblar olamiga xush kelibsiz!</b>\n\n` +
+        `Ushbu bot orqali siz kerakli kitoblarning <b>PDF elektron nusxasini</b> hamda <b>Audio formatini</b> bir joydan olishingiz mumkin.\n\n` +
+        `🔢 <b>Kitobni olish uchun:</b>\n` +
+        `Shunchaki kitobning <b>kodini</b> yuboring (masalan: <code>101</code>).\n\n` +
+        `Kerakli bo'limni tanlang:`;
+
+      await ctx.reply(welcomeText, {
+        parse_mode: "HTML",
+        reply_markup: getMainKeyboard(userId)
+      });
+    } else {
+      await ctx.answerCallbackQuery({
+        text: "❌ Siz hali kanalga a'zo bo'lmadingiz! Iltimos, oldin kanalga a'zo bo'ling.",
+        show_alert: true
+      });
+    }
     return;
   }
 
