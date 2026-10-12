@@ -8,7 +8,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const REQUIRED_CHANNELS = [
   { username: '@audio_pdfkitoblari', url: 'https://t.me/audio_pdfkitoblari', name: 'Kitoblar olami (Audio & PDF)' },
-  { username: '@hamyonimai', url: 'https://t.me/hamyonimai', name: 'Hamyonim AI' }
+  { username: '@daqiqanewsuz', url: 'https://t.me/daqiqanewsuz', name: 'Daqiqa News' }
 ];
 
 if (!BOT_TOKEN) {
