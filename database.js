@@ -50,6 +50,13 @@ async function initDB() {
 
         CREATE INDEX IF NOT EXISTS idx_books_code ON books(LOWER(code));
         CREATE INDEX IF NOT EXISTS idx_books_title ON books(LOWER(title));
+
+        CREATE TABLE IF NOT EXISTS join_requests (
+          user_id BIGINT,
+          chat_id TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (user_id, chat_id)
+        );
       `);
       console.log("✅ PostgreSQL jadvallari tayyor.");
     } finally {
@@ -78,6 +85,13 @@ async function initDB() {
 
       CREATE INDEX IF NOT EXISTS idx_books_code ON books(LOWER(code));
       CREATE INDEX IF NOT EXISTS idx_books_title ON books(LOWER(title));
+
+      CREATE TABLE IF NOT EXISTS join_requests (
+        user_id INTEGER,
+        chat_id TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, chat_id)
+      );
     `);
     console.log("✅ SQLite jadvallari tayyor.");
   }
@@ -253,6 +267,50 @@ async function deleteBookByCode(code) {
   }
 }
 
+async function addJoinRequest(userId, chatId) {
+  try {
+    if (isPostgres) {
+      await pgPool.query(`
+        INSERT INTO join_requests (user_id, chat_id)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id, chat_id) DO NOTHING;
+      `, [userId, String(chatId)]);
+    } else {
+      const stmt = sqliteDb.prepare(`
+        INSERT INTO join_requests (user_id, chat_id)
+        VALUES (?, ?)
+        ON CONFLICT (user_id, chat_id) DO NOTHING;
+      `);
+      stmt.run(userId, String(chatId));
+    }
+  } catch (err) {
+    console.error("addJoinRequest xatosi:", err.message);
+  }
+}
+
+async function hasJoinRequest(userId, chatId) {
+  try {
+    if (isPostgres) {
+      const res = await pgPool.query(`
+        SELECT 1 FROM join_requests
+        WHERE user_id = $1 AND chat_id = $2
+        LIMIT 1;
+      `, [userId, String(chatId)]);
+      return res.rowCount > 0;
+    } else {
+      const stmt = sqliteDb.prepare(`
+        SELECT 1 FROM join_requests
+        WHERE user_id = ? AND chat_id = ?
+        LIMIT 1;
+      `);
+      return Boolean(stmt.get(userId, String(chatId)));
+    }
+  } catch (err) {
+    console.error("hasJoinRequest xatosi:", err.message);
+    return false;
+  }
+}
+
 module.exports = {
   initDB,
   addUser,
@@ -265,5 +323,7 @@ module.exports = {
   searchBooks,
   getAllBooks,
   getTotalBooksCount,
-  deleteBookByCode
+  deleteBookByCode,
+  addJoinRequest,
+  hasJoinRequest
 };

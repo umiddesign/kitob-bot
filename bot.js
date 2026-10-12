@@ -7,8 +7,17 @@ const db = require('./database');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const REQUIRED_CHANNELS = [
-  { username: '@audio_pdfkitoblari', url: 'https://t.me/audio_pdfkitoblari', name: 'Kitoblar olami (Audio & PDF)' },
-  { username: '@daqiqanewsuz', url: 'https://t.me/daqiqanewsuz', name: 'Daqiqa News' }
+  { 
+    id: '@audio_pdfkitoblari', 
+    url: 'https://t.me/audio_pdfkitoblari', 
+    name: 'Kitoblar olami (Audio & PDF)' 
+  },
+  { 
+    id: process.env.SECOND_CHANNEL_ID || null, 
+    url: 'https://t.me/+3fXsgjzTjjg1Yjli', 
+    name: '2-homiy kanal',
+    isInvite: true
+  }
 ];
 
 if (!BOT_TOKEN) {
@@ -23,7 +32,8 @@ function getSubKeyboard(unsubscribedChannels) {
   const keyboard = new InlineKeyboard();
   const list = unsubscribedChannels && unsubscribedChannels.length > 0 ? unsubscribedChannels : REQUIRED_CHANNELS;
   list.forEach((ch, idx) => {
-    keyboard.url(`📢 ${idx + 1}-kanalga a'zo bo'lish`, ch.url).row();
+    const label = ch.isInvite ? `📩 ${idx + 1}-kanalga qo'shilish so'rovi (Zayavka)` : `📢 ${idx + 1}-kanalga a'zo bo'lish`;
+    keyboard.url(label, ch.url).row();
   });
   keyboard.text("✅ Obunani tekshirish", "check_sub");
   return keyboard;
@@ -35,14 +45,22 @@ async function getUnsubscribedChannels(api, userId) {
   const unsubscribed = [];
 
   for (const ch of REQUIRED_CHANNELS) {
-    try {
-      const member = await api.getChatMember(ch.username, userId);
-      const isMember = ["creator", "administrator", "member", "restricted"].includes(member.status);
-      if (!isMember) {
-        unsubscribed.push(ch);
+    let isSub = false;
+
+    // 1. Agar foydalanuvchi ushbu kanalga so'rov (join request) yuborgan bo'lsa
+    const hasReq = await db.hasJoinRequest(userId, ch.id || ch.url);
+    if (hasReq) {
+      isSub = true;
+    } else if (ch.id) {
+      try {
+        const member = await api.getChatMember(ch.id, userId);
+        isSub = ["creator", "administrator", "member", "restricted"].includes(member.status);
+      } catch (err) {
+        isSub = false;
       }
-    } catch (err) {
-      console.error(`Obunani tekshirishda xatolik (${ch.username}):`, err.description || err.message);
+    }
+
+    if (!isSub) {
       unsubscribed.push(ch);
     }
   }
@@ -60,13 +78,14 @@ async function isUserSubscribed(api, userId) {
 async function sendSubPrompt(ctx, unsubscribed = REQUIRED_CHANNELS) {
   let subText = `⚠️ <b>Botdan foydalanish uchun quyidagi homiy kanallarga a'zo bo'lishingiz shart:</b>\n\n`;
   unsubscribed.forEach((ch, idx) => {
-    subText += `${idx + 1}. 👉 <b>${ch.username}</b>\n`;
+    subText += `${idx + 1}. 👉 <a href="${ch.url}">${escapeHtml(ch.name)}</a>\n`;
   });
-  subText += `\nIltimos, barcha kanallarga a'zo bo'ling va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
+  subText += `\nIltimos, kanalga a'zo bo'ling (yoki qo'shilish so'rovi yuboring) va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
 
   await ctx.reply(subText, {
     parse_mode: "HTML",
-    reply_markup: getSubKeyboard(unsubscribed)
+    reply_markup: getSubKeyboard(unsubscribed),
+    link_preview_options: { is_disabled: true }
   });
 }
 
@@ -329,6 +348,22 @@ bot.hears("❌ Bekor qilish", async (ctx) => {
   }
 });
 
+// Qo'shilish so'rovi (Zayavka / Join Request) kelganda
+bot.on("chat_join_request", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+  console.log(`📥 Yangi zayavka (Join Request): Foydalanuvchi ${userId} -> Kanal ${chatId}`);
+
+  // Bazaga foydalanuvchi so'rov yuborganini yozib qo'yamiz
+  await db.addJoinRequest(userId, String(chatId));
+  await db.addJoinRequest(userId, 'https://t.me/+3fXsgjzTjjg1Yjli');
+});
+
+// Bot kanalga qo'shilganda
+bot.on("my_chat_member", async (ctx) => {
+  console.log(`Bot kanalga qo'shildi/o'zgardi: ${ctx.chat.title} (ID: ${ctx.chat.id})`);
+});
+
 // ==================== ADMIN STATE HANDLING & SEARCH ====================
 
 bot.on("message", async (ctx) => {
@@ -337,6 +372,21 @@ bot.on("message", async (ctx) => {
 
   // Foydalanuvchini bazaga qo'shish
   await db.addUser(userId, ctx.from.username, ctx.from.first_name);
+
+  // Agar admin biror kanaldan xabarni forward qilsa, kanal ID'sini ko'rsatish
+  if (userId === ADMIN_ID && (ctx.message.forward_origin || ctx.message.forward_from_chat)) {
+    const fChat = ctx.message.forward_origin?.chat || ctx.message.forward_from_chat;
+    if (fChat) {
+      await ctx.reply(
+        `📢 <b>Kanal aniqlandi!</b>\n\n` +
+        `Nomi: <b>${escapeHtml(fChat.title || 'Nomsiz')}</b>\n` +
+        `ID raqami: <code>${fChat.id}</code>\n\n` +
+        `<i>(Ushbu ID raqam yopiq kanallarni tekshirish uchun ishlatiladi)</i>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+  }
 
   // Admin bosqichlarini tekshirish
   if (userId === ADMIN_ID && adminState.has(userId)) {
@@ -655,7 +705,7 @@ async function startApp() {
     const runner = run(bot, {
       runner: {
         fetch: {
-          allowed_updates: ["message", "callback_query"],
+          allowed_updates: ["message", "callback_query", "chat_join_request", "my_chat_member"],
         },
       },
     });
