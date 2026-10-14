@@ -686,14 +686,20 @@ bot.catch((err) => {
   console.error(`Xatolik yuz berdi (${ctx?.update?.update_id}):`, err.error);
 });
 
-// Render / Railway uchun HTTP Health-Check serveri
-const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Bot ajoyib tarzda 24/7 ishlamoqda!');
-}).listen(PORT, () => {
-  console.log(`🌐 Health-check serveri ${PORT}-portda ishlamoqda`);
-});
+// HTTP Health-Check serveri (Render/Railway uchun, agar PORT berilsa)
+if (process.env.PORT) {
+  const PORT = process.env.PORT;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Bot ajoyib tarzda 24/7 ishlamoqda!');
+  });
+  server.on('error', (err) => {
+    console.log('HTTP port ogohlantirishi (bot ishlashda davom etadi):', err.message);
+  });
+  server.listen(PORT, () => {
+    console.log(`🌐 Health-check serveri ${PORT}-portda ishlamoqda`);
+  });
+}
 
 // Asosiy ishga tushirish funksiyasi
 async function startApp() {
