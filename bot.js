@@ -11,12 +11,6 @@ const REQUIRED_CHANNELS = [
     id: '@audio_pdfkitoblari', 
     url: 'https://t.me/audio_pdfkitoblari', 
     name: 'Kitoblar olami (Audio & PDF)' 
-  },
-  { 
-    id: process.env.SECOND_CHANNEL_ID || null, 
-    url: 'https://t.me/+3fXsgjzTjjg1Yjli', 
-    name: '2-homiy kanal',
-    isInvite: true
   }
 ];
 
@@ -31,10 +25,13 @@ const bot = new Bot(BOT_TOKEN);
 function getSubKeyboard(unsubscribedChannels) {
   const keyboard = new InlineKeyboard();
   const list = unsubscribedChannels && unsubscribedChannels.length > 0 ? unsubscribedChannels : REQUIRED_CHANNELS;
-  list.forEach((ch, idx) => {
-    const label = ch.isInvite ? `📩 ${idx + 1}-kanalga qo'shilish so'rovi (Zayavka)` : `📢 ${idx + 1}-kanalga a'zo bo'lish`;
-    keyboard.url(label, ch.url).row();
-  });
+  if (list.length === 1) {
+    keyboard.url("📢 Kanalga a'zo bo'lish", list[0].url).row();
+  } else {
+    list.forEach((ch, idx) => {
+      keyboard.url(`📢 ${idx + 1}-kanalga a'zo bo'lish`, ch.url).row();
+    });
+  }
   keyboard.text("✅ Obunani tekshirish", "check_sub");
   return keyboard;
 }
@@ -76,11 +73,15 @@ async function isUserSubscribed(api, userId) {
 
 // Obuna bo'lish haqida xabar
 async function sendSubPrompt(ctx, unsubscribed = REQUIRED_CHANNELS) {
-  let subText = `⚠️ <b>Botdan foydalanish uchun quyidagi homiy kanallarga a'zo bo'lishingiz shart:</b>\n\n`;
-  unsubscribed.forEach((ch, idx) => {
-    subText += `${idx + 1}. 👉 <a href="${ch.url}">${escapeHtml(ch.name)}</a>\n`;
-  });
-  subText += `\nIltimos, kanalga a'zo bo'ling (yoki qo'shilish so'rovi yuboring) va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
+  let subText = `⚠️ <b>Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'lishingiz shart:</b>\n\n`;
+  if (unsubscribed.length === 1) {
+    subText += `👉 <a href="${unsubscribed[0].url}"><b>${escapeHtml(unsubscribed[0].name)}</b></a>\n`;
+  } else {
+    unsubscribed.forEach((ch, idx) => {
+      subText += `${idx + 1}. 👉 <a href="${ch.url}">${escapeHtml(ch.name)}</a>\n`;
+    });
+  }
+  subText += `\nIltimos, kanalga a'zo bo'ling va so'ng pastdagi <b>"✅ Obunani tekshirish"</b> tugmasini bosing:`;
 
   await ctx.reply(subText, {
     parse_mode: "HTML",
