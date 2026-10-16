@@ -2,10 +2,95 @@ require('dotenv').config();
 const path = require('node:path');
 
 const DATABASE_URL = process.env.DATABASE_URL;
+const VAULT_URL = process.env.VAULT_URL || 'https://kitob-bot.alwaysdata.net/db_sync.php';
+const VAULT_KEY = process.env.VAULT_KEY || 'kb_vault_8515917861_secret';
 
 let isPostgres = Boolean(DATABASE_URL);
 let pgPool = null;
 let sqliteDb = null;
+
+async function syncToVault(payload) {
+  if (isPostgres || !VAULT_URL) return;
+  try {
+    await fetch(VAULT_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Vault-Key': VAULT_KEY
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (err) {
+    console.error("Cloud Vault sync ogohlantirishi:", err.message);
+  }
+}
+
+async function restoreFromVault() {
+  if (isPostgres || !VAULT_URL) return;
+  try {
+    const res = await fetch(VAULT_URL, {
+      headers: { 'X-Vault-Key': VAULT_KEY }
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.ok) return;
+
+    if (Array.isArray(data.books)) {
+      const bookStmt = sqliteDb.prepare(`
+        INSERT INTO books (id, code, title, author, description, cover_file_id, pdf_file_id, audio_file_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET
+          title = excluded.title,
+          author = excluded.author,
+          description = excluded.description,
+          cover_file_id = excluded.cover_file_id,
+          pdf_file_id = excluded.pdf_file_id,
+          audio_file_id = excluded.audio_file_id
+      `);
+      for (const b of data.books) {
+        bookStmt.run(
+          b.id,
+          b.code,
+          b.title,
+          b.author || null,
+          b.description || null,
+          b.cover_file_id || null,
+          b.pdf_file_id || null,
+          b.audio_file_id || null,
+          b.created_at || new Date().toISOString()
+        );
+      }
+    }
+
+    if (Array.isArray(data.users)) {
+      const userStmt = sqliteDb.prepare(`
+        INSERT INTO users (id, username, first_name, joined_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          username = excluded.username,
+          first_name = excluded.first_name
+      `);
+      for (const u of data.users) {
+        userStmt.run(u.id, u.username || null, u.first_name || '', u.joined_at || new Date().toISOString());
+      }
+    }
+
+    if (Array.isArray(data.join_requests)) {
+      const reqStmt = sqliteDb.prepare(`
+        INSERT INTO join_requests (user_id, chat_id, created_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, chat_id) DO NOTHING
+      `);
+      for (const r of data.join_requests) {
+        reqStmt.run(r.user_id, String(r.chat_id), r.created_at || new Date().toISOString());
+      }
+    }
+
+    console.log(`☁️ Doimiy bulutli bazadan tiklandi: ${data.books?.length || 0} ta kitob, ${data.users?.length || 0} ta foydalanuvchi.`);
+  } catch (err) {
+    console.error("Cloud Vault tiklash xatosi:", err.message);
+  }
+}
 
 if (isPostgres) {
   const { Pool } = require('pg');
@@ -21,7 +106,7 @@ if (isPostgres) {
   const { DatabaseSync } = require('node:sqlite');
   const dbPath = path.join(__dirname, 'books.db');
   sqliteDb = new DatabaseSync(dbPath);
-  console.log("📁 Mahalliy SQLite bazasi ishlatilmoqda.");
+  console.log("📁 Mahalliy SQLite + Doimiy Bulutli Zaxira bazasi ishlatilmoqda.");
 }
 
 async function initDB() {
@@ -93,11 +178,13 @@ async function initDB() {
         PRIMARY KEY (user_id, chat_id)
       );
     `);
-    console.log("✅ SQLite jadvallari tayyor.");
+    await restoreFromVault();
+    console.log("✅ SQLite va Bulutli Baza tayyor.");
   }
 }
 
 // User queries
+const syncedUsers = new Set();
 async function addUser(id, username, firstName) {
   try {
     if (isPostgres) {
@@ -117,6 +204,10 @@ async function addUser(id, username, firstName) {
           first_name = excluded.first_name;
       `);
       stmt.run(id, username || null, firstName || '');
+      if (!syncedUsers.has(id)) {
+        syncedUsers.add(id);
+        syncToVault({ action: 'add_user', user: { id, username: username || null, first_name: firstName || '' } });
+      }
     }
   } catch (err) {
     console.error("addUser xatosi:", err.message);
@@ -156,33 +247,51 @@ async function bookCodeExists(code) {
 }
 
 async function addBook({ code, title, author, description, cover_file_id, pdf_file_id, audio_file_id }) {
+  const cleanBook = {
+    code: code.trim(),
+    title: title.trim(),
+    author: author ? author.trim() : null,
+    description: description ? description.trim() : null,
+    cover_file_id: cover_file_id || null,
+    pdf_file_id: pdf_file_id || null,
+    audio_file_id: audio_file_id || null
+  };
+
   if (isPostgres) {
     await pgPool.query(`
       INSERT INTO books (code, title, author, description, cover_file_id, pdf_file_id, audio_file_id)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
     `, [
-      code.trim(),
-      title.trim(),
-      author ? author.trim() : null,
-      description ? description.trim() : null,
-      cover_file_id || null,
-      pdf_file_id || null,
-      audio_file_id || null
+      cleanBook.code,
+      cleanBook.title,
+      cleanBook.author,
+      cleanBook.description,
+      cleanBook.cover_file_id,
+      cleanBook.pdf_file_id,
+      cleanBook.audio_file_id
     ]);
   } else {
     const stmt = sqliteDb.prepare(`
       INSERT INTO books (code, title, author, description, cover_file_id, pdf_file_id, audio_file_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(code) DO UPDATE SET
+        title = excluded.title,
+        author = excluded.author,
+        description = excluded.description,
+        cover_file_id = excluded.cover_file_id,
+        pdf_file_id = excluded.pdf_file_id,
+        audio_file_id = excluded.audio_file_id
     `);
     stmt.run(
-      code.trim(),
-      title.trim(),
-      author ? author.trim() : null,
-      description ? description.trim() : null,
-      cover_file_id || null,
-      pdf_file_id || null,
-      audio_file_id || null
+      cleanBook.code,
+      cleanBook.title,
+      cleanBook.author,
+      cleanBook.description,
+      cleanBook.cover_file_id,
+      cleanBook.pdf_file_id,
+      cleanBook.audio_file_id
     );
+    await syncToVault({ action: 'add_book', book: cleanBook });
   }
 }
 
@@ -263,7 +372,9 @@ async function deleteBookByCode(code) {
     return res.rowCount > 0;
   } else {
     const stmt = sqliteDb.prepare(`DELETE FROM books WHERE LOWER(code) = LOWER(?)`);
-    return stmt.run(cleanCode).changes > 0;
+    const deleted = stmt.run(cleanCode).changes > 0;
+    await syncToVault({ action: 'delete_book', code: cleanCode });
+    return deleted;
   }
 }
 
@@ -282,6 +393,7 @@ async function addJoinRequest(userId, chatId) {
         ON CONFLICT (user_id, chat_id) DO NOTHING;
       `);
       stmt.run(userId, String(chatId));
+      syncToVault({ action: 'add_join_request', user_id: userId, chat_id: String(chatId) });
     }
   } catch (err) {
     console.error("addJoinRequest xatosi:", err.message);
