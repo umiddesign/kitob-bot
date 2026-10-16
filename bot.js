@@ -22,7 +22,7 @@ if (!BOT_TOKEN) {
 const bot = new Bot(BOT_TOKEN);
 
 // Majburiy obuna klaviaturasi
-function getSubKeyboard(unsubscribedChannels) {
+function getSubKeyboard(unsubscribedChannels, startPayload = "") {
   const keyboard = new InlineKeyboard();
   const list = unsubscribedChannels && unsubscribedChannels.length > 0 ? unsubscribedChannels : REQUIRED_CHANNELS;
   if (list.length === 1) {
@@ -32,7 +32,8 @@ function getSubKeyboard(unsubscribedChannels) {
       keyboard.url(`📢 ${idx + 1}-kanalga a'zo bo'lish`, ch.url).row();
     });
   }
-  keyboard.text("✅ Obunani tekshirish", "check_sub");
+  const callbackData = startPayload ? `check_sub:${startPayload}` : "check_sub";
+  keyboard.text("✅ Obunani tekshirish", callbackData);
   return keyboard;
 }
 
@@ -72,7 +73,7 @@ async function isUserSubscribed(api, userId) {
 }
 
 // Obuna bo'lish haqida xabar
-async function sendSubPrompt(ctx, unsubscribed = REQUIRED_CHANNELS) {
+async function sendSubPrompt(ctx, unsubscribed = REQUIRED_CHANNELS, startPayload = "") {
   let subText = `⚠️ <b>Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'lishingiz shart:</b>\n\n`;
   if (unsubscribed.length === 1) {
     subText += `👉 <a href="${unsubscribed[0].url}"><b>${escapeHtml(unsubscribed[0].name)}</b></a>\n`;
@@ -85,7 +86,7 @@ async function sendSubPrompt(ctx, unsubscribed = REQUIRED_CHANNELS) {
 
   await ctx.reply(subText, {
     parse_mode: "HTML",
-    reply_markup: getSubKeyboard(unsubscribed),
+    reply_markup: getSubKeyboard(unsubscribed, startPayload),
     link_preview_options: { is_disabled: true }
   });
 }
@@ -113,7 +114,7 @@ bot.use(async (ctx, next) => {
   }
 
   // Agar "Obunani tekshirish" tugmasi bosilgan bo'lsa, o'tkazish
-  if (ctx.callbackQuery && ctx.callbackQuery.data === "check_sub") {
+  if (ctx.callbackQuery?.data?.startsWith("check_sub")) {
     return next();
   }
 
@@ -122,11 +123,16 @@ bot.use(async (ctx, next) => {
   if (unsubscribed.length > 0) {
     if (ctx.callbackQuery) {
       await ctx.answerCallbackQuery({
-        text: "❌ Botdan foydalanish uchun barcha homiy kanallarga a'zo bo'ling!",
+        text: "❌ Botdan foydalanish uchun rasmiy kanalimizga a'zo bo'ling!",
         show_alert: true
       });
     } else {
-      await sendSubPrompt(ctx, unsubscribed);
+      let startPayload = "";
+      const msgText = ctx.message?.text?.trim() || "";
+      if (msgText.startsWith("/start ")) {
+        startPayload = msgText.slice(7).trim();
+      }
+      await sendSubPrompt(ctx, unsubscribed, startPayload);
     }
     return;
   }
@@ -224,6 +230,67 @@ async function sendBookCard(ctx, book) {
   });
 }
 
+// Kanalga kitob e'lonini (rasmi + yuklab olish tugmasi bilan) avtomatik chiqarish
+async function publishBookToChannel(api, book, botUsername = "pdf_audio_kitoblarbot") {
+  const targetChannel = REQUIRED_CHANNELS[0]?.id || "@audio_pdfkitoblari";
+  const hasPdf = Boolean(book.pdf_file_id);
+  const hasAudio = Boolean(book.audio_file_id);
+
+  let formatLabel = "PDF + Audio 🎧";
+  let btnLabel = "📥 Kitobni yuklab olish (PDF + Audio)";
+  if (hasPdf && !hasAudio) {
+    formatLabel = "PDF 📄";
+    btnLabel = "📥 Kitobni yuklab olish (PDF)";
+  } else if (!hasPdf && hasAudio) {
+    formatLabel = "Audio kitob 🎧";
+    btnLabel = "🎧 Audio kitobni tinglash";
+  }
+
+  let postText = `📚 <b>${escapeHtml(book.title)}</b>\n\n`;
+  if (book.author) postText += `✍️ <b>Muallif:</b> ${escapeHtml(book.author)}\n`;
+  postText += `📄 <b>Format:</b> ${formatLabel}\n`;
+  postText += `🔢 <b>Kitob kodi:</b> <code>${escapeHtml(book.code)}</code>\n`;
+  if (book.description) postText += `\n📝 <b>Kitob haqida:</b>\n${escapeHtml(book.description)}\n`;
+  postText += `\n👇 <i>Kitobni yuklab olish uchun quyidagi tugmani bosing:</i>`;
+
+  const isCleanCode = /^[A-Za-z0-9_-]{1,50}$/.test(book.code);
+  const startParam = isCleanCode ? `book_${book.code}` : `id_${book.id}`;
+  const deepLink = `https://t.me/${botUsername}?start=${startParam}`;
+
+  const inlineKeyboard = new InlineKeyboard().url(btnLabel, deepLink);
+
+  if (book.cover_file_id) {
+    await api.sendPhoto(targetChannel, book.cover_file_id, {
+      caption: postText,
+      parse_mode: "HTML",
+      reply_markup: inlineKeyboard
+    });
+  } else {
+    await api.sendMessage(targetChannel, postText, {
+      parse_mode: "HTML",
+      reply_markup: inlineKeyboard
+    });
+  }
+}
+
+// Deep-link payload orqali kitobni topish
+async function resolveBookFromPayload(payload) {
+  if (!payload) return null;
+  const clean = payload.trim();
+  if (clean.startsWith("id_")) {
+    const id = Number(clean.slice(3));
+    if (!Number.isNaN(id)) return await db.getBookById(id);
+  }
+  if (clean.startsWith("book_")) {
+    const codeOrId = clean.slice(5);
+    const byCode = await db.getBookByCode(codeOrId);
+    if (byCode) return byCode;
+    const id = Number(codeOrId);
+    if (!Number.isNaN(id)) return await db.getBookById(id);
+  }
+  return await db.getBookByCode(clean);
+}
+
 // ==================== FOYDALANUVCHI KOMANDALARI ====================
 
 // /start
@@ -233,11 +300,23 @@ bot.command("start", async (ctx) => {
 
   await db.addUser(user.id, user.username, user.first_name);
 
+  const payload = typeof ctx.match === "string" ? ctx.match.trim() : "";
+
   // Majburiy obunani tekshirish
   const isSub = await isUserSubscribed(ctx.api, user.id);
   if (!isSub) {
-    await sendSubPrompt(ctx);
+    const unsubscribed = await getUnsubscribedChannels(ctx.api, user.id);
+    await sendSubPrompt(ctx, unsubscribed, payload);
     return;
+  }
+
+  // Agar kanaldan "Kitobni yuklab olish" tugmasini bosib kirgan bo'lsa
+  if (payload) {
+    const book = await resolveBookFromPayload(payload);
+    if (book) {
+      await sendBookCard(ctx, book);
+      return;
+    }
   }
 
   const welcomeText = `Assalomu alaykum, <b>${escapeHtml(ctx.from?.first_name || 'Foydalanuvchi')}</b>!\n\n` +
@@ -550,10 +629,23 @@ bot.on("message", async (ctx) => {
       const savedBook = await db.getBookByCode(state.data.code);
       adminState.delete(userId);
 
-      await ctx.reply("🎉 <b>Kitob muvaffaqiyatli saqlandi!</b>\nQuyida qanday ko'rinishda chiqishi keltirilgan:", {
-        parse_mode: "HTML",
-        reply_markup: getAdminKeyboard()
-      });
+      let channelStatus = "\n📢 <b>@audio_pdfkitoblari kanaliga avtomatik e'lon joylandi!</b>";
+      if (savedBook) {
+        try {
+          await publishBookToChannel(ctx.api, savedBook, ctx.me?.username || "pdf_audio_kitoblarbot");
+        } catch (err) {
+          console.error("Kanalga post chiqarishda xatolik:", err.message);
+          channelStatus = `\n⚠️ <i>Kanalga chiqarishda xatolik: ${escapeHtml(err.message)}</i>`;
+        }
+      }
+
+      await ctx.reply(
+        `🎉 <b>Kitob muvaffaqiyatli saqlandi!</b>${channelStatus}\n\nQuyida bot ichida qanday ko'rinishda chiqishi keltirilgan:`,
+        {
+          parse_mode: "HTML",
+          reply_markup: getAdminKeyboard()
+        }
+      );
 
       if (savedBook) {
         await sendBookCard(ctx, savedBook);
@@ -591,14 +683,26 @@ bot.on("callback_query:data", async (ctx) => {
   }
 
   // Obunani tekshirish tugmasi
-  if (data === "check_sub") {
+  if (data.startsWith("check_sub")) {
     const userId = ctx.from.id;
+    const startPayload = data.includes(":") ? data.slice(data.indexOf(":") + 1) : "";
     const unsubscribed = await getUnsubscribedChannels(ctx.api, userId);
     if (unsubscribed.length === 0) {
-      await ctx.answerCallbackQuery({ text: "✅ Rahmat! Barcha kanallarga obuna tasdiqlandi." });
+      await ctx.answerCallbackQuery({ text: "✅ Rahmat! Kanalga obuna tasdiqlandi." });
       try {
         await ctx.deleteMessage();
       } catch (_) {}
+
+      if (startPayload) {
+        const book = await resolveBookFromPayload(startPayload);
+        if (book) {
+          await ctx.reply("✅ Obuna tasdiqlandi! Marhamat, siz so'ragan kitob:", {
+            reply_markup: getMainKeyboard(userId)
+          });
+          await sendBookCard(ctx, book);
+          return;
+        }
+      }
 
       const welcomeText = `Assalomu alaykum, <b>${escapeHtml(ctx.from?.first_name || 'Foydalanuvchi')}</b>!\n\n` +
         `📚 <b>Kitoblar olamiga xush kelibsiz!</b>\n\n` +
@@ -613,7 +717,7 @@ bot.on("callback_query:data", async (ctx) => {
       });
     } else {
       await ctx.answerCallbackQuery({
-        text: `❌ Siz hali barcha kanallarga a'zo bo'lmadingiz! (${unsubscribed.length} ta kanal qoldi)`,
+        text: `❌ Siz hali rasmiy kanalimizga a'zo bo'lmadingiz!`,
         show_alert: true
       });
     }
