@@ -102,6 +102,11 @@ bot.use(
 
 // Majburiy obunani tekshiruvchi global middleware
 bot.use(async (ctx, next) => {
+  // Kanal yoki guruh ichidagi xabarlarga javob bermaslik (faqat shaxsiy chatda ishlash)
+  if (ctx.chat && ctx.chat.type !== "private") {
+    return next();
+  }
+
   const userId = ctx.from?.id;
   if (!userId) return next();
 
@@ -143,6 +148,21 @@ bot.use(async (ctx, next) => {
 // Admin holatlarini saqlash
 const adminState = new Map();
 
+// Fayl ID'larni massiv sifatida o'qish (1 ta yoki ko'p qismli audio/pdf uchun)
+function parseFileIds(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  const str = String(raw).trim();
+  if (!str) return [];
+  if (str.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(str);
+      if (Array.isArray(parsed)) return parsed.filter(Boolean);
+    } catch (_) {}
+  }
+  return [str];
+}
+
 // Asosiy menyu klaviaturasi
 function getMainKeyboard(userId) {
   const keyboard = new Keyboard()
@@ -157,9 +177,9 @@ function getMainKeyboard(userId) {
 // Admin menyu klaviaturasi
 function getAdminKeyboard() {
   return new Keyboard()
-    .text("➕ Yangi kitob qo'shish").text("🗑 Kitobni o'chirish").row()
-    .text("📊 Statistika").text("📢 Xabar tarqatish").row()
-    .text("⬅️ Bosh menyu")
+    .text("➕ Yangi kitob qo'shish").text("📚 Kitoblar ro'yxati").row()
+    .text("🗑 Kitobni o'chirish").text("📊 Statistika").row()
+    .text("📢 Xabar tarqatish").text("⬅️ Bosh menyu")
     .resized();
 }
 
@@ -169,38 +189,58 @@ function getCancelKeyboard() {
 }
 
 // Kitob kartasi uchun inline klaviatura
-function getBookInlineKeyboard(book) {
+function getBookInlineKeyboard(book, isAdmin = false) {
   const inline = new InlineKeyboard();
-  const hasPdf = Boolean(book.pdf_file_id);
-  const hasAudio = Boolean(book.audio_file_id);
+  const pdfList = parseFileIds(book.pdf_file_id);
+  const audioList = parseFileIds(book.audio_file_id);
+  const hasPdf = pdfList.length > 0;
+  const hasAudio = audioList.length > 0;
+  const audioBtnText = audioList.length > 1 ? `🎧 Audio (${audioList.length} qism)` : "🎧 Audio tinglash";
 
   if (hasPdf && hasAudio) {
     inline.text("📄 PDF yuklab olish", `pdf:${book.id}`)
-          .text("🎧 Audio tinglash", `audio:${book.id}`)
+          .text(audioBtnText, `audio:${book.id}`)
           .row()
           .text("📦 Ikkalasini ham olish", `both:${book.id}`);
   } else if (hasPdf) {
     inline.text("📄 PDF yuklab olish", `pdf:${book.id}`);
   } else if (hasAudio) {
-    inline.text("🎧 Audio tinglash", `audio:${book.id}`);
+    inline.text(audioBtnText, `audio:${book.id}`);
   }
+
+  if (isAdmin) {
+    inline.row()
+      .text("➕ Audio qism qo'shish", `add_audio:${book.id}`)
+      .text("📢 Kanalga chiqarish", `pub_ch:${book.id}`);
+  }
+
   return inline;
 }
 
 // Kitob matnini chiroyli formatlash
 function formatBookCaption(book) {
+  const pdfList = parseFileIds(book.pdf_file_id);
+  const audioList = parseFileIds(book.audio_file_id);
+
+  let formatParts = [];
+  if (pdfList.length > 0) formatParts.push("PDF 📄");
+  if (audioList.length > 0) {
+    formatParts.push(audioList.length > 1 ? `Audio (${audioList.length} qism) 🎧` : "Audio 🎧");
+  }
+
   let text = `📖 <b>${escapeHtml(book.title)}</b>\n\n`;
   if (book.author) text += `✍️ <b>Muallif:</b> ${escapeHtml(book.author)}\n`;
+  if (formatParts.length > 0) text += `📂 <b>Format:</b> ${formatParts.join(" + ")}\n`;
   text += `🔢 <b>Kitob kodi:</b> <code>${escapeHtml(book.code)}</code>\n`;
   if (book.description) text += `\n📝 <b>Tavsif:</b>\n${escapeHtml(book.description)}\n`;
   
-  text += `\n<i>Yuklab olish uchun quyidagi tugmalardan foydalaning:</i>`;
+  text += `\n👇 <i>Yuklab olish uchun quyidagi tugmalardan foydalaning:</i>`;
   return text;
 }
 
 function escapeHtml(text) {
   if (!text) return '';
-  return text
+  return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
@@ -209,7 +249,8 @@ function escapeHtml(text) {
 // Foydalanuvchiga kitobni ko'rsatish
 async function sendBookCard(ctx, book) {
   const caption = formatBookCaption(book);
-  const keyboard = getBookInlineKeyboard(book);
+  const isAdmin = ctx.from?.id === ADMIN_ID;
+  const keyboard = getBookInlineKeyboard(book, isAdmin);
 
   if (book.cover_file_id) {
     try {
@@ -230,11 +271,57 @@ async function sendBookCard(ctx, book) {
   });
 }
 
+// PDF faylni xavfsiz va chiroyli yuborish
+async function sendBookPdf(ctx, book) {
+  const pdfList = parseFileIds(book.pdf_file_id);
+  for (let i = 0; i < pdfList.length; i++) {
+    const partLabel = pdfList.length > 1 ? ` (${i + 1}-qism)` : "";
+    const caption =
+      `📄 <b>${escapeHtml(book.title)}</b>${partLabel}\n` +
+      (book.author ? `✍️ <b>Muallif:</b> ${escapeHtml(book.author)}\n` : "") +
+      `🔢 <b>Kitob kodi:</b> <code>${escapeHtml(book.code)}</code>\n\n` +
+      `🤖 <b>Botimiz:</b> @pdf_audio_kitoblarbot\n` +
+      `📢 <b>Kanalimiz:</b> @audio_pdfkitoblari`;
+
+    await ctx.replyWithDocument(pdfList[i], {
+      caption,
+      parse_mode: "HTML"
+    });
+  }
+}
+
+// Audio faylni xavfsiz va chiroyli yuborish (Audio / Voice / Document fallback bilan)
+async function sendBookAudio(ctx, book) {
+  const audioList = parseFileIds(book.audio_file_id);
+  for (let i = 0; i < audioList.length; i++) {
+    const fileId = audioList[i];
+    const partLabel = audioList.length > 1 ? ` (${i + 1}-qism)` : "";
+    const caption =
+      `🎧 <b>${escapeHtml(book.title)}</b>${partLabel}\n` +
+      (book.author ? `✍️ <b>Muallif:</b> ${escapeHtml(book.author)}\n` : "") +
+      `🔢 <b>Kitob kodi:</b> <code>${escapeHtml(book.code)}</code>\n\n` +
+      `🤖 <b>Botimiz:</b> @pdf_audio_kitoblarbot\n` +
+      `📢 <b>Kanalimiz:</b> @audio_pdfkitoblari`;
+
+    try {
+      await ctx.replyWithAudio(fileId, { caption, parse_mode: "HTML" });
+    } catch (_) {
+      try {
+        await ctx.replyWithVoice(fileId, { caption, parse_mode: "HTML" });
+      } catch (__) {
+        await ctx.replyWithDocument(fileId, { caption, parse_mode: "HTML" });
+      }
+    }
+  }
+}
+
 // Kanalga kitob e'lonini (rasmi + yuklab olish tugmasi bilan) avtomatik chiqarish
 async function publishBookToChannel(api, book, botUsername = "pdf_audio_kitoblarbot") {
   const targetChannel = REQUIRED_CHANNELS[0]?.id || "@audio_pdfkitoblari";
-  const hasPdf = Boolean(book.pdf_file_id);
-  const hasAudio = Boolean(book.audio_file_id);
+  const pdfList = parseFileIds(book.pdf_file_id);
+  const audioList = parseFileIds(book.audio_file_id);
+  const hasPdf = pdfList.length > 0;
+  const hasAudio = audioList.length > 0;
 
   let formatLabel = "PDF + Audio 🎧";
   let btnLabel = "📥 Kitobni yuklab olish (PDF + Audio)";
@@ -291,13 +378,35 @@ async function resolveBookFromPayload(payload) {
   return await db.getBookByCode(clean);
 }
 
+// Foydalanuvchi yozgan matndan kodni aqlli ajratib olish (masalan: "#101", "kod 101", "101")
+async function findBookSmart(rawText) {
+  if (!rawText) return null;
+  const trimmed = rawText.trim();
+  let book = await db.getBookByCode(trimmed);
+  if (book) return book;
+
+  const cleaned = trimmed
+    .replace(/^#/i, "")
+    .replace(/^kitob\s*kodi\s*:?\s*/i, "")
+    .replace(/^kod\s*:?\s*/i, "")
+    .replace(/\s*-?\s*kitob$/i, "")
+    .trim();
+
+  if (cleaned && cleaned !== trimmed) {
+    book = await db.getBookByCode(cleaned);
+  }
+  return book;
+}
+
 // ==================== FOYDALANUVCHI KOMANDALARI ====================
 
 // /start
 bot.command("start", async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   const user = ctx.from;
   if (!user) return;
 
+  adminState.delete(user.id);
   await db.addUser(user.id, user.username, user.first_name);
 
   const payload = typeof ctx.match === "string" ? ctx.match.trim() : "";
@@ -334,6 +443,7 @@ bot.command("start", async (ctx) => {
 
 // Yordam
 bot.hears("ℹ️ Yordam", async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   const helpText = `ℹ️ <b>Botdan foydalanish bo'yicha qo'llanma:</b>\n\n` +
     `1. Kitobning maxsus <b>kodini</b> yozib yuboring (masalan: <code>101</code>).\n` +
     `2. Bot sizga kitob ma'lumotlarini taqdim etadi.\n` +
@@ -341,13 +451,14 @@ bot.hears("ℹ️ Yordam", async (ctx) => {
     `   • 📄 <b>PDF yuklab olish</b>\n` +
     `   • 🎧 <b>Audio tinglash</b>\n` +
     `   • 📦 <b>Ikkalasini ham olish</b>\n\n` +
-    `<i>Eslatma: Qidiruv faqat kitob kodi orqali ishlaydi.</i>`;
+    `📢 <b>Rasmiy kanalimiz:</b> @audio_pdfkitoblari`;
 
   await ctx.reply(helpText, { parse_mode: "HTML" });
 });
 
 // Qidirish tugmasi
 bot.hears(["🔍 Kitob kodi orqali qidirish", "🔍 Kitob qidirish"], async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   await ctx.reply("🔢 Kitob <b>kodini</b> yuboring:\n<i>(Masalan: <code>101</code>)</i>", {
     parse_mode: "HTML"
   });
@@ -355,6 +466,7 @@ bot.hears(["🔍 Kitob kodi orqali qidirish", "🔍 Kitob qidirish"], async (ctx
 
 // Bosh menyuga qaytish
 bot.hears("⬅️ Bosh menyu", async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   adminState.delete(ctx.from?.id);
   await ctx.reply("Asosiy menyudasiz:", {
     reply_markup: getMainKeyboard(ctx.from?.id)
@@ -364,6 +476,7 @@ bot.hears("⬅️ Bosh menyu", async (ctx) => {
 // ==================== ADMIN PANELI ====================
 
 bot.hears("⚙️ Admin paneli", async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   if (ctx.from?.id !== ADMIN_ID) {
     return ctx.reply("Kechirasiz, siz admin emassiz.");
   }
@@ -374,22 +487,55 @@ bot.hears("⚙️ Admin paneli", async (ctx) => {
   });
 });
 
+// Admin uchun barcha kitoblar ro'yxati
+bot.hears("📚 Kitoblar ro'yxati", async (ctx) => {
+  if (ctx.chat?.type !== "private" || ctx.from?.id !== ADMIN_ID) return;
+  const books = await db.getAllBooks(50, 0);
+  if (!books || books.length === 0) {
+    return ctx.reply("📭 Hozircha bazada kitoblar yo'q.", { reply_markup: getAdminKeyboard() });
+  }
+
+  let listText = `📚 <b>Bazadagi barcha kitoblar (${books.length} ta):</b>\n\n`;
+  const kb = new InlineKeyboard();
+
+  books.forEach((b, idx) => {
+    const pdfCount = parseFileIds(b.pdf_file_id).length;
+    const audioCount = parseFileIds(b.audio_file_id).length;
+    const badges = [
+      pdfCount > 0 ? "📄" : "",
+      audioCount > 0 ? (audioCount > 1 ? `🎧x${audioCount}` : "🎧") : ""
+    ].filter(Boolean).join("");
+
+    listText += `${idx + 1}. <b>Kod:</b> <code>${escapeHtml(b.code)}</code> — <b>${escapeHtml(b.title)}</b> ${badges}\n`;
+    kb.text(`📖 #${b.code} ${b.title.slice(0, 18)}`, `view_book:${b.id}`);
+    if ((idx + 1) % 2 === 0) kb.row();
+  });
+
+  listText += `\n<i>Kitobni ko'rish, kanalga chiqarish yoki audio qism qo'shish uchun pastdagi tugmasini bosing:</i>`;
+
+  await ctx.reply(listText, {
+    parse_mode: "HTML",
+    reply_markup: kb
+  });
+});
+
 // Statistika
 bot.hears("📊 Statistika", async (ctx) => {
-  if (ctx.from?.id !== ADMIN_ID) return;
+  if (ctx.chat?.type !== "private" || ctx.from?.id !== ADMIN_ID) return;
   const userCount = await db.getUserCount();
   const bookCount = await db.getTotalBooksCount();
 
   const statText = `📊 <b>Bot statistikasi:</b>\n\n` +
     `👥 Jami foydalanuvchilar: <b>${userCount} ta</b>\n` +
-    `📚 Jami kitoblar: <b>${bookCount} ta</b>`;
+    `📚 Jami kitoblar: <b>${bookCount} ta</b>\n` +
+    `☁️ Doimiy bulutli zaxira: <b>Yoqilgan (Faol) ✅</b>`;
 
   await ctx.reply(statText, { parse_mode: "HTML" });
 });
 
 // Kitob o'chirishni boshlash
 bot.hears("🗑 Kitobni o'chirish", async (ctx) => {
-  if (ctx.from?.id !== ADMIN_ID) return;
+  if (ctx.chat?.type !== "private" || ctx.from?.id !== ADMIN_ID) return;
   adminState.set(ctx.from.id, { step: "DELETE_CODE" });
   await ctx.reply("O'chirmoqchi bo'lgan kitobingizning <b>kodini</b> kiriting:\n<i>(Masalan: 101)</i>", {
     parse_mode: "HTML",
@@ -399,32 +545,32 @@ bot.hears("🗑 Kitobni o'chirish", async (ctx) => {
 
 // Yangi kitob qo'shishni boshlash
 bot.hears("➕ Yangi kitob qo'shish", async (ctx) => {
-  if (ctx.from?.id !== ADMIN_ID) return;
+  if (ctx.chat?.type !== "private" || ctx.from?.id !== ADMIN_ID) return;
   adminState.set(ctx.from.id, { step: "ADD_CODE", data: {} });
   await ctx.reply(
     "🆕 <b>Yangi kitob qo'shish:</b>\n\n" +
-    "1️⃣ Kitob uchun <b>kod (raqam yoki so'z)</b> kiriting:\n<i>(Masalan: 101 yoki kitob12)</i>",
+    "1️⃣ Kitob uchun <b>kod (raqam yoki so'z)</b> kiriting:\n<i>(Masalan: 101)</i>",
     {
       parse_mode: "HTML",
-      reply_markup: getCancelKeyboard()
+      reply_markup: new Keyboard().text("❌ Bekor qilish").resized()
     }
   );
 });
 
 // Xabar tarqatishni boshlash
 bot.hears("📢 Xabar tarqatish", async (ctx) => {
-  if (ctx.from?.id !== ADMIN_ID) return;
+  if (ctx.chat?.type !== "private" || ctx.from?.id !== ADMIN_ID) return;
   adminState.set(ctx.from.id, { step: "BROADCAST" });
   await ctx.reply("Foydalanuvchilarga yubormoqchi bo'lgan xabaringizni yuboring (matn, rasm, video bo'lishi mumkin):", {
     reply_markup: new Keyboard().text("❌ Bekor qilish").resized()
   });
 });
 
-// Bekor qilish / O'tkazib yuborish
+// Bekor qilish
 bot.hears("❌ Bekor qilish", async (ctx) => {
-  if (ctx.from?.id === ADMIN_ID) {
+  if (ctx.chat?.type === "private" && ctx.from?.id === ADMIN_ID) {
     adminState.delete(ctx.from.id);
-    await ctx.reply("Amal bekor qilindi.", { reply_markup: getAdminKeyboard() });
+    await ctx.reply("❌ Amal bekor qilindi.", { reply_markup: getAdminKeyboard() });
   }
 });
 
@@ -434,9 +580,7 @@ bot.on("chat_join_request", async (ctx) => {
   const userId = ctx.from.id;
   console.log(`📥 Yangi zayavka (Join Request): Foydalanuvchi ${userId} -> Kanal ${chatId}`);
 
-  // Bazaga foydalanuvchi so'rov yuborganini yozib qo'yamiz
   await db.addJoinRequest(userId, String(chatId));
-  await db.addJoinRequest(userId, 'https://t.me/+3fXsgjzTjjg1Yjli');
 });
 
 // Bot kanalga qo'shilganda
@@ -447,28 +591,14 @@ bot.on("my_chat_member", async (ctx) => {
 // ==================== ADMIN STATE HANDLING & SEARCH ====================
 
 bot.on("message", async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   const userId = ctx.from?.id;
   if (!userId) return;
 
   // Foydalanuvchini bazaga qo'shish
   await db.addUser(userId, ctx.from.username, ctx.from.first_name);
 
-  // Agar admin biror kanaldan xabarni forward qilsa, kanal ID'sini ko'rsatish
-  if (userId === ADMIN_ID && (ctx.message.forward_origin || ctx.message.forward_from_chat)) {
-    const fChat = ctx.message.forward_origin?.chat || ctx.message.forward_from_chat;
-    if (fChat) {
-      await ctx.reply(
-        `📢 <b>Kanal aniqlandi!</b>\n\n` +
-        `Nomi: <b>${escapeHtml(fChat.title || 'Nomsiz')}</b>\n` +
-        `ID raqami: <code>${fChat.id}</code>\n\n` +
-        `<i>(Ushbu ID raqam yopiq kanallarni tekshirish uchun ishlatiladi)</i>`,
-        { parse_mode: "HTML" }
-      );
-      return;
-    }
-  }
-
-  // Admin bosqichlarini tekshirish
+  // Admin bosqichlarini tekshirish (Forward qilingan fayllar ham qabul qilinishi uchun birinchi tekshiriladi!)
   if (userId === ADMIN_ID && adminState.has(userId)) {
     const state = adminState.get(userId);
     const text = ctx.message.text?.trim();
@@ -506,7 +636,6 @@ bot.on("message", async (ctx) => {
         try {
           await ctx.copyMessage(id);
           sentCount++;
-          // Telegram rate limitini buzmaslik uchun kichik kechikish
           await new Promise(r => setTimeout(r, 40));
         } catch (_) {
           blockedCount++;
@@ -522,19 +651,69 @@ bot.on("message", async (ctx) => {
       return;
     }
 
-    // 3. Kitob qo'shish qadamma-qadam
+    // 3. Mavjud kitobga qo'shimcha audio qism qo'shish
+    if (state.step === "APPEND_AUDIO") {
+      const book = await db.getBookById(state.bookId);
+      if (!book) {
+        adminState.delete(userId);
+        return ctx.reply("❌ Kitob topilmadi.", { reply_markup: getAdminKeyboard() });
+      }
+
+      if (text === "✅ Tugatish va saqlash") {
+        adminState.delete(userId);
+        await ctx.reply("✅ Barcha audio qismlar saqlandi!", { reply_markup: getAdminKeyboard() });
+        await sendBookCard(ctx, book);
+        return;
+      }
+
+      let newAudioId = null;
+      if (ctx.message.audio) newAudioId = ctx.message.audio.file_id;
+      else if (ctx.message.voice) newAudioId = ctx.message.voice.file_id;
+      else if (ctx.message.document) newAudioId = ctx.message.document.file_id;
+
+      if (!newAudioId) {
+        return ctx.reply("Iltimos, audio fayl yuboring yoki yakunlash uchun <b>'✅ Tugatish va saqlash'</b> tugmasini bosing:", {
+          parse_mode: "HTML"
+        });
+      }
+
+      const currentAudios = parseFileIds(book.audio_file_id);
+      currentAudios.push(newAudioId);
+      const serialized = currentAudios.length === 1 ? currentAudios[0] : JSON.stringify(currentAudios);
+
+      await db.addBook({
+        code: book.code,
+        title: book.title,
+        author: book.author,
+        description: book.description,
+        cover_file_id: book.cover_file_id,
+        pdf_file_id: book.pdf_file_id,
+        audio_file_id: serialized
+      });
+
+      await ctx.reply(
+        `✅ <b>${currentAudios.length}-audio qism qo'shildi!</b>\n\nYana keyingi audio qismini yuborishingiz mumkin yoki tugatish uchun pastdagi <b>"✅ Tugatish va saqlash"</b> tugmasini bosing:`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new Keyboard().text("✅ Tugatish va saqlash").text("❌ Bekor qilish").resized()
+        }
+      );
+      return;
+    }
+
+    // 4. Kitob qo'shish qadamma-qadam
     // Qadam 1: Kod
     if (state.step === "ADD_CODE") {
       if (!text) return ctx.reply("Iltimos, kodni yozib yuboring:");
       const exists = await db.bookCodeExists(text);
       if (exists) {
-        return ctx.reply(`❌ Bu kod (<code>${escapeHtml(text)}</code>) band! Boshqa kod kiriting:`, { parse_mode: "HTML" });
+        return ctx.reply(`❌ Bu kod (<code>${escapeHtml(text)}</code>) band! Boshqa kod kiriting (yoki avval eskisini o'chiring):`, { parse_mode: "HTML" });
       }
       state.data.code = text;
       state.step = "ADD_TITLE";
       await ctx.reply("2️⃣ Kitob <b>nomini</b> kiriting:\n<i>(Masalan: O'tkan kunlar)</i>", {
         parse_mode: "HTML",
-        reply_markup: getCancelKeyboard()
+        reply_markup: new Keyboard().text("❌ Bekor qilish").resized()
       });
       return;
     }
@@ -578,7 +757,7 @@ bot.on("message", async (ctx) => {
       if (ctx.message.photo && ctx.message.photo.length > 0) {
         state.data.cover_file_id = ctx.message.photo[ctx.message.photo.length - 1].file_id;
       } else if (!isSkip) {
-        return ctx.reply("Iltimos, rasm yuboring yoki '⏭ O'tkazib yuborish' tugmasini bosing:");
+        return ctx.reply("Iltimos, muqova uchun oddiy rasm (Photo) yuboring yoki '⏭ O'tkazib yuborish' tugmasini bosing:");
       }
       state.step = "ADD_PDF";
       await ctx.reply("6️⃣ Kitobning <b>PDF hujjat faylini (Document)</b> yuboring (yoki '⏭ O'tkazib yuborish'):", {
@@ -596,7 +775,7 @@ bot.on("message", async (ctx) => {
         return ctx.reply("Iltimos, PDF faylni hujjat ko'rinishida yuboring yoki '⏭ O'tkazib yuborish' tugmasini bosing:");
       }
       state.step = "ADD_AUDIO";
-      await ctx.reply("7️⃣ Kitobning <b>Audio faylini (Audio yoki Ovoz)</b> yuboring (yoki '⏭ O'tkazib yuborish'):", {
+      await ctx.reply("7️⃣ Kitobning <b>Audio faylini (MP3 / Audio / Ovoz)</b> yuboring (yoki '⏭ O'tkazib yuborish'):", {
         parse_mode: "HTML",
         reply_markup: getCancelKeyboard()
       });
@@ -613,6 +792,10 @@ bot.on("message", async (ctx) => {
         state.data.audio_file_id = ctx.message.document.file_id;
       } else if (!isSkip) {
         return ctx.reply("Iltimos, audio fayl yuboring yoki '⏭ O'tkazib yuborish' tugmasini bosing:");
+      }
+
+      if (!state.data.pdf_file_id && !state.data.audio_file_id) {
+        return ctx.reply("⚠️ Kitobda kamida PDF yoki Audio fayl bo'lishi kerak! Iltimos, Audio fayl yuboring:");
       }
 
       // Bazaga saqlash
@@ -640,7 +823,7 @@ bot.on("message", async (ctx) => {
       }
 
       await ctx.reply(
-        `🎉 <b>Kitob muvaffaqiyatli saqlandi!</b>${channelStatus}\n\nQuyida bot ichida qanday ko'rinishda chiqishi keltirilgan:`,
+        `🎉 <b>Kitob muvaffaqiyatli saqlandi!</b>${channelStatus}\n\nQuyida bot ichida qanday ko'rinishda chiqishi keltirilgan (agar kitobning yana boshqa audio qismlari bo'lsa, pastdagi <b>"➕ Audio qism qo'shish"</b> tugmasini bosishingiz mumkin):`,
         {
           parse_mode: "HTML",
           reply_markup: getAdminKeyboard()
@@ -654,11 +837,25 @@ bot.on("message", async (ctx) => {
     }
   }
 
-  // Foydalanuvchi matn yuborganda — FAQAT KOD bo'yicha qidiruv
+  // Agar admin (kitob qo'shishdan tashqari paytda) biror kanaldan xabarni forward qilsa, kanal ID'sini ko'rsatish
+  if (userId === ADMIN_ID && (ctx.message.forward_origin || ctx.message.forward_from_chat)) {
+    const fChat = ctx.message.forward_origin?.chat || ctx.message.forward_from_chat;
+    if (fChat) {
+      await ctx.reply(
+        `📢 <b>Kanal aniqlandi!</b>\n\n` +
+        `Nomi: <b>${escapeHtml(fChat.title || 'Nomsiz')}</b>\n` +
+        `ID raqami: <code>${fChat.id}</code>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+  }
+
+  // Foydalanuvchi matn yuborganda — KOD bo'yicha aqlli qidiruv
   const code = ctx.message.text?.trim();
   if (!code) return;
 
-  const bookByCode = await db.getBookByCode(code);
+  const bookByCode = await findBookSmart(code);
   if (bookByCode) {
     await sendBookCard(ctx, bookByCode);
     return;
@@ -724,19 +921,67 @@ bot.on("callback_query:data", async (ctx) => {
     return;
   }
 
+  // Admin: Kitobni ro'yxatdan ko'rish
+  if (data.startsWith("view_book:")) {
+    if (ctx.from.id !== ADMIN_ID) return ctx.answerCallbackQuery();
+    const bookId = Number(data.split(":")[1]);
+    const book = await db.getBookById(bookId);
+    if (!book) {
+      return ctx.answerCallbackQuery({ text: "Kitob topilmadi!", show_alert: true });
+    }
+    await ctx.answerCallbackQuery();
+    await sendBookCard(ctx, book);
+    return;
+  }
+
+  // Admin: Kitobni kanalga chiqarish
+  if (data.startsWith("pub_ch:")) {
+    if (ctx.from.id !== ADMIN_ID) return ctx.answerCallbackQuery();
+    const bookId = Number(data.split(":")[1]);
+    const book = await db.getBookById(bookId);
+    if (!book) {
+      return ctx.answerCallbackQuery({ text: "Kitob topilmadi!", show_alert: true });
+    }
+    try {
+      await publishBookToChannel(ctx.api, book, ctx.me?.username || "pdf_audio_kitoblarbot");
+      await ctx.answerCallbackQuery({ text: "✅ @audio_pdfkitoblari kanaliga joylandi!", show_alert: true });
+    } catch (err) {
+      await ctx.answerCallbackQuery({ text: `❌ Xatolik: ${err.message}`, show_alert: true });
+    }
+    return;
+  }
+
+  // Admin: Mavjud kitobga yana audio qism qo'shish
+  if (data.startsWith("add_audio:")) {
+    if (ctx.from.id !== ADMIN_ID) return ctx.answerCallbackQuery();
+    const bookId = Number(data.split(":")[1]);
+    const book = await db.getBookById(bookId);
+    if (!book) {
+      return ctx.answerCallbackQuery({ text: "Kitob topilmadi!", show_alert: true });
+    }
+    adminState.set(ctx.from.id, { step: "APPEND_AUDIO", bookId });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      `🎧 <b>"${escapeHtml(book.title)}"</b> kitobiga qo'shimcha audio qism qo'shish:\n\n` +
+      `Yangi audio faylni (yoki bir nechta audio fayllarni ketma-ket) yuboring. Tugatgach <b>"✅ Tugatish va saqlash"</b> tugmasini bosing:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new Keyboard().text("✅ Tugatish va saqlash").text("❌ Bekor qilish").resized()
+      }
+    );
+    return;
+  }
+
   // PDF yuklab olish
   if (data.startsWith("pdf:")) {
     const bookId = Number(data.split(":")[1]);
     const book = await db.getBookById(bookId);
-    if (!book || !book.pdf_file_id) {
+    if (!book || parseFileIds(book.pdf_file_id).length === 0) {
       await ctx.answerCallbackQuery({ text: "PDF fayli mavjud emas!", show_alert: true });
       return;
     }
-    await ctx.answerCallbackQuery({ text: "PDF yuklanmoqda..." });
-    await ctx.replyWithDocument(book.pdf_file_id, {
-      caption: `📄 <b>${escapeHtml(book.title)}</b> (PDF nusxa)`,
-      parse_mode: "HTML"
-    });
+    await ctx.answerCallbackQuery({ text: "📄 PDF yuborilmoqda..." });
+    await sendBookPdf(ctx, book);
     return;
   }
 
@@ -744,15 +989,12 @@ bot.on("callback_query:data", async (ctx) => {
   if (data.startsWith("audio:")) {
     const bookId = Number(data.split(":")[1]);
     const book = await db.getBookById(bookId);
-    if (!book || !book.audio_file_id) {
+    if (!book || parseFileIds(book.audio_file_id).length === 0) {
       await ctx.answerCallbackQuery({ text: "Audio fayli mavjud emas!", show_alert: true });
       return;
     }
-    await ctx.answerCallbackQuery({ text: "Audio yuklanmoqda..." });
-    await ctx.replyWithAudio(book.audio_file_id, {
-      caption: `🎧 <b>${escapeHtml(book.title)}</b> (Audio kitob)`,
-      parse_mode: "HTML"
-    });
+    await ctx.answerCallbackQuery({ text: "🎧 Audio yuborilmoqda..." });
+    await sendBookAudio(ctx, book);
     return;
   }
 
@@ -764,21 +1006,9 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery({ text: "Kitob topilmadi!", show_alert: true });
       return;
     }
-    await ctx.answerCallbackQuery({ text: "Fayllar yuborilmoqda..." });
-
-    if (book.pdf_file_id) {
-      await ctx.replyWithDocument(book.pdf_file_id, {
-        caption: `📄 <b>${escapeHtml(book.title)}</b> (PDF nusxa)`,
-        parse_mode: "HTML"
-      });
-    }
-
-    if (book.audio_file_id) {
-      await ctx.replyWithAudio(book.audio_file_id, {
-        caption: `🎧 <b>${escapeHtml(book.title)}</b> (Audio kitob)`,
-        parse_mode: "HTML"
-      });
-    }
+    await ctx.answerCallbackQuery({ text: "📦 Fayllar yuborilmoqda..." });
+    await sendBookPdf(ctx, book);
+    await sendBookAudio(ctx, book);
     return;
   }
 

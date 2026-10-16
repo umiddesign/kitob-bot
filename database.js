@@ -246,6 +246,8 @@ async function bookCodeExists(code) {
   }
 }
 
+let lastVaultRestore = 0;
+
 async function addBook({ code, title, author, description, cover_file_id, pdf_file_id, audio_file_id }) {
   const cleanBook = {
     code: code.trim(),
@@ -261,6 +263,13 @@ async function addBook({ code, title, author, description, cover_file_id, pdf_fi
     await pgPool.query(`
       INSERT INTO books (code, title, author, description, cover_file_id, pdf_file_id, audio_file_id)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT(code) DO UPDATE SET
+        title = EXCLUDED.title,
+        author = EXCLUDED.author,
+        description = EXCLUDED.description,
+        cover_file_id = EXCLUDED.cover_file_id,
+        pdf_file_id = EXCLUDED.pdf_file_id,
+        audio_file_id = EXCLUDED.audio_file_id
     `, [
       cleanBook.code,
       cleanBook.title,
@@ -302,7 +311,13 @@ async function getBookByCode(code) {
     return res.rows[0] || null;
   } else {
     const stmt = sqliteDb.prepare(`SELECT * FROM books WHERE LOWER(code) = LOWER(?)`);
-    return stmt.get(cleanCode) || null;
+    let book = stmt.get(cleanCode) || null;
+    if (!book && Date.now() - lastVaultRestore > 15000) {
+      lastVaultRestore = Date.now();
+      await restoreFromVault();
+      book = stmt.get(cleanCode) || null;
+    }
+    return book;
   }
 }
 
@@ -312,7 +327,13 @@ async function getBookById(id) {
     return res.rows[0] || null;
   } else {
     const stmt = sqliteDb.prepare(`SELECT * FROM books WHERE id = ?`);
-    return stmt.get(id) || null;
+    let book = stmt.get(id) || null;
+    if (!book && Date.now() - lastVaultRestore > 15000) {
+      lastVaultRestore = Date.now();
+      await restoreFromVault();
+      book = stmt.get(id) || null;
+    }
+    return book;
   }
 }
 
